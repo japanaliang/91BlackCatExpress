@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>黑貓出貨標籤 PDF 合併工具 (修復版)</title>
+    <!-- 引入 pdf-lib -->
+    <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 20px; background-color: #f4f4f9; }
+        .container { max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        h1 { font-size: 24px; color: #333; text-align: center; }
+        .upload-area { border: 2px dashed #ccc; padding: 40px; text-align: center; margin: 20px 0; border-radius: 8px; cursor: pointer; }
+        .upload-area:hover { background-color: #fafafa; border-color: #999; }
+        button { display: block; width: 100%; padding: 12px; background-color: #4CAF50; color: white; border: none; border-radius: 4px; font-size: 16px; cursor: pointer; }
+        button:hover { background-color: #45a049; }
+        button:disabled { background-color: #cccccc; cursor: not-allowed; }
+        #status { margin-top: 15px; text-align: center; color: #666; font-weight: bold; }
+        #fileList { margin-top: 15px; font-size: 14px; color: #444; max-height: 150px; overflow-y: auto; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>📦 黑貓出貨標籤合併工具</h1>
+    <p style="text-align: center; font-size: 14px; color: #666;">
+        維持原本 PDF A4 尺寸不拉伸變形<br>
+        遇到「半」自動裁切上半部標籤，上下完美合併在一頁 A4 上。
+    </p>
+
+    <div class="upload-area" onclick="document.getElementById('fileInput').click()">
+        點擊這裡選擇多個 PDF 檔案 <br> (可一次框選多個檔案)
+    </div>
+    <input type="file" id="fileInput" multiple accept="application/pdf" style="display: none;" onchange="updateFileList()">
+
+    <div id="fileList"></div>
+
+    <button id="mergeBtn" onclick="mergePDFs()" disabled>開始合併 PDF</button>
+    <div id="status"></div>
+</div>
+
+<script>
+    let selectedFiles = [];
+
+    function updateFileList() {
+        const input = document.getElementById('fileInput');
+        selectedFiles = Array.from(input.files);
+        
+        const listDiv = document.getElementById('fileList');
+        if (selectedFiles.length > 0) {
+            listDiv.innerHTML = "<strong>已選擇檔案 (" + selectedFiles.length + "):</strong><br>" + 
+                                selectedFiles.map(f => f.name).join('<br>');
+            document.getElementById('mergeBtn').disabled = false;
+        } else {
+            listDiv.innerHTML = "";
+            document.getElementById('mergeBtn').disabled = true;
+        }
+    }
+
+    async function mergePDFs() {
+        if (selectedFiles.length === 0) return;
+
+        const statusDiv = document.getElementById('status');
+        statusDiv.innerText = "處理中，請稍候...";
+        document.getElementById('mergeBtn').disabled = true;
+
+        try {
+            const { PDFDocument } = PDFLib;
+            const mergedPdf = await PDFDocument.create();
+            
+            let pendingHalf = null; // 暫存等待合併的半頁
+
+            for (const file of selectedFiles) {
+                const arrayBuffer = await file.arrayBuffer();
+                const pdf = await PDFDocument.load(arrayBuffer);
+                const pageCount = pdf.getPageCount();
+                
+                const isHalf = file.name.includes("半");
+
+                for (let i = 0; i < pageCount; i++) {
+                    const originalPage = pdf.getPage(i);
+                    const { width, height } = originalPage.getSize();
+                    const halfHeight = height / 2;
+
+                    if (isHalf) {
+                        // 修正關鍵：正確使用索引 [i] 嵌入 PDF 頁面
+                        const [embeddedPage] = await mergedPdf.embedPdf(pdf, [i]);
+
+                        if (pendingHalf === null) {
+                            // 第一張「半」單先暫存
+                            pendingHalf = { embeddedPage, width, height, halfHeight };
+                        } else {
+                            // 第二張「半」單：創建一張標準 A4 頁面
+                            const newPage = mergedPdf.addPage([width, height]);
+
+                            // 上半部：繪製第一張「半」單（以 y:0 擺放並以半高度顯示）
+                            newPage.drawPage(pendingHalf.embeddedPage, {
+                                x: 0,
+                                y: 0,
+                                width: width,
+                                height: height
+                            });
+
+                            // 下半部：將第二張「半」單向下位移 halfHeight，使其上半部標籤露在頁面底部
+                            newPage.drawPage(embeddedPage, {
+                                x: 0,
+                                y: -halfHeight,
+                                width: width,
+                                height: height
+                            });
+
+                            pendingHalf = null; // 清空暫存
+                        }
+                    } else {
+                        // 若遇到「全」單，但前面有落單的「半」單，先獨立輸出該「半」單
+                        if (pendingHalf !== null) {
+                            const newPage = mergedPdf.addPage([pendingHalf.width, pendingHalf.height]);
+                            newPage.drawPage(pendingHalf.embeddedPage, {
+                                x: 0,
+                                y: 0,
+                                width: pendingHalf.width,
+                                height: pendingHalf.height
+                            });
+                            pendingHalf = null;
+                        }
+
+                        // 新增「全」單頁面：1:1 原始尺寸貼上
+                        const [embeddedFull] = await mergedPdf.embedPdf(pdf, [i]);
+                        const newPage = mergedPdf.addPage([width, height]);
+                        newPage.drawPage(embeddedFull, {
+                            x: 0,
+                            y: 0,
+                            width: width,
+                            height: height
+                        });
+                    }
+                }
+            }
+
+            // 迴圈結束後，若有剩餘單數的「半」單，單獨繪製在 A4 上半部
+            if (pendingHalf !== null) {
+                const newPage = mergedPdf.addPage([pendingHalf.width, pendingHalf.height]);
+                newPage.drawPage(pendingHalf.embeddedPage, {
+                    x: 0,
+                    y: 0,
+                    width: pendingHalf.width,
+                    height: pendingHalf.height
+                });
+            }
+
+            // 輸出合併後的 PDF
+            const mergedPdfBytes = await mergedPdf.save();
+            const blob = new Blob([mergedPdfBytes], { type: "application/pdf" });
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = `黑貓出貨單合併結果_${new Date().getTime()}.pdf`;
+            link.click();
+
+            statusDiv.innerText = "✅ 合併完成並已開始下載！(100% 原始尺寸不變形)";
+        } catch (error) {
+            console.error(error);
+            statusDiv.innerText = "❌ 發生錯誤：" + error.message;
+        } finally {
+            document.getElementById('mergeBtn').disabled = false;
+        }
+    }
+</script>
+
+</body>
+</html>
