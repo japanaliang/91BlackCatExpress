@@ -1,31 +1,39 @@
+
 <!DOCTYPE html>
 <html lang="zh-TW">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>黑貓出貨標籤 PDF 合併工具</title>
-    <!-- 引入 pdf-lib -->
+    <title>黑貓出貨標籤 PDF 智慧合併工具</title>
+    <!-- 引入 pdf-lib 用於編輯與合併 PDF -->
     <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+    <!-- 引入 pdf.js 用於讀取與分析 PDF 內容 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script>
+        // 設定 PDF.js 的 Worker 
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    </script>
     <style>
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 20px; background-color: #f4f4f9; }
         .container { max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
         h1 { font-size: 24px; color: #333; text-align: center; }
-        .upload-area { border: 2px dashed #ccc; padding: 40px; text-align: center; margin: 20px 0; border-radius: 8px; cursor: pointer; }
-        .upload-area:hover { background-color: #fafafa; border-color: #999; }
-        button { display: block; width: 100%; padding: 12px; background-color: #4CAF50; color: white; border: none; border-radius: 4px; font-size: 16px; cursor: pointer; }
+        .upload-area { border: 2px dashed #ccc; padding: 40px; text-align: center; margin: 20px 0; border-radius: 8px; cursor: pointer; transition: 0.3s; }
+        .upload-area:hover { background-color: #eaf5ea; border-color: #4CAF50; }
+        button { display: block; width: 100%; padding: 12px; background-color: #4CAF50; color: white; border: none; border-radius: 4px; font-size: 16px; cursor: pointer; transition: 0.3s; }
         button:hover { background-color: #45a049; }
         button:disabled { background-color: #cccccc; cursor: not-allowed; }
         #status { margin-top: 15px; text-align: center; color: #666; font-weight: bold; }
-        #fileList { margin-top: 15px; font-size: 14px; color: #444; max-height: 150px; overflow-y: auto; }
+        #fileList { margin-top: 15px; font-size: 14px; color: #444; max-height: 150px; overflow-y: auto; background: #fafafa; padding: 10px; border-radius: 5px; }
     </style>
 </head>
 <body>
 
 <div class="container">
-    <h1>📦 黑貓出貨標籤合併工具</h1>
+    <h1>📦 黑貓出貨標籤合併工具 (智慧配對版)</h1>
     <p style="text-align: center; font-size: 14px; color: #666;">
-        維持原本 PDF A4 尺寸不拉伸變形<br>
-        遇到「半」自動裁切上半部標籤，上下完美合併在一頁 A4 上。
+        ✔️ 智慧跨檔案配對：不論排序（半+全+半...），任意兩張「半頁」皆會合併為一張 A4<br>
+        ✔️ 全頁獨立輸出不重疊<br>
+        ✔️ 若半頁總數為偶數則全數滿頁合併；若為奇數則僅最後一張單獨放上半部
     </p>
 
     <div class="upload-area" onclick="document.getElementById('fileInput').click()">
@@ -33,9 +41,9 @@
     </div>
     <input type="file" id="fileInput" multiple accept="application/pdf" style="display: none;" onchange="updateFileList()">
 
-    <div id="fileList"></div>
+    <div id="fileList" style="display: none;"></div>
 
-    <button id="mergeBtn" onclick="mergePDFs()" disabled>開始合併 PDF</button>
+    <button id="mergeBtn" onclick="mergePDFs()" disabled>開始自動分析與合併</button>
     <div id="status"></div>
 </div>
 
@@ -48,11 +56,12 @@
         
         const listDiv = document.getElementById('fileList');
         if (selectedFiles.length > 0) {
+            listDiv.style.display = "block";
             listDiv.innerHTML = "<strong>已選擇檔案 (" + selectedFiles.length + "):</strong><br>" + 
                                 selectedFiles.map(f => f.name).join('<br>');
             document.getElementById('mergeBtn').disabled = false;
         } else {
-            listDiv.innerHTML = "";
+            listDiv.style.display = "none";
             document.getElementById('mergeBtn').disabled = true;
         }
     }
@@ -61,94 +70,95 @@
         if (selectedFiles.length === 0) return;
 
         const statusDiv = document.getElementById('status');
-        statusDiv.innerText = "處理中，請稍候...";
+        statusDiv.innerText = "🔍 正在解析與合併檔案，請稍候...";
         document.getElementById('mergeBtn').disabled = true;
 
         try {
             const { PDFDocument } = PDFLib;
             const mergedPdf = await PDFDocument.create();
             
-            let pendingHalf = null; // 暫存等待合併的半頁
+            let pendingHalf = null; // 用來跨檔案暫存落單的「半頁」
 
             for (const file of selectedFiles) {
                 const arrayBuffer = await file.arrayBuffer();
+                
+                // 1. 使用 PDF-lib 載入以供編輯
                 const pdf = await PDFDocument.load(arrayBuffer);
                 const pageCount = pdf.getPageCount();
-                
-                const isHalf = file.name.includes("半");
+
+                // 2. 使用 PDF.js 載入以供內容分析
+                const pdfJS = await pdfjsLib.getDocument({ data: arrayBuffer.slice(0) }).promise;
 
                 for (let i = 0; i < pageCount; i++) {
                     const originalPage = pdf.getPage(i);
                     const { width, height } = originalPage.getSize();
                     const halfHeight = height / 2;
 
-                    if (isHalf) {
-                        // 修正關鍵：正確使用索引 [i] 嵌入 PDF 頁面
-                        const [embeddedPage] = await mergedPdf.embedPdf(pdf, [i]);
+                    // 解析目前頁面的文字
+                    const pageJS = await pdfJS.getPage(i + 1);
+                    const textContent = await pageJS.getTextContent();
+                    
+                    let isFull = false;
+                    let hasBottomContent = false;
 
+                    // 檢查 A4 下半部是否有文字內容
+                    for (const item of textContent.items) {
+                        const textY = item.transform[5];
+                        if (textY < halfHeight - 30 && item.str.trim().length > 0) {
+                            hasBottomContent = true;
+                            break;
+                        }
+                    }
+
+                    // 檢查關鍵字出現頻率
+                    const fullText = textContent.items.map(item => item.str).join('').replace(/\s+/g, '');
+                    const keywordCount = (fullText.match(/包裹查詢號碼/g) || []).length;
+                    
+                    if (hasBottomContent || keywordCount >= 2) {
+                        isFull = true;
+                    }
+
+                    const [embeddedPage] = await mergedPdf.embedPdf(pdf, [i]);
+
+                    if (isFull) {
+                        // 遇到【全頁】：直接獨立新增一頁 A4 輸出，不影響 pendingHalf 的配對進度
+                        const newPage = mergedPdf.addPage([width, height]);
+                        newPage.drawPage(embeddedPage, { x: 0, y: 0, width, height });
+
+                    } else {
+                        // 遇到【半頁】
                         if (pendingHalf === null) {
-                            // 第一張「半」單先暫存
+                            // 第 1, 3, 5... 張半頁：先暫存，等待下一張半頁出現
                             pendingHalf = { embeddedPage, width, height, halfHeight };
                         } else {
-                            // 第二張「半」單：創建一張標準 A4 頁面
+                            // 第 2, 4, 6... 張半頁：湊滿一對，合併輸出成一張 A4
                             const newPage = mergedPdf.addPage([width, height]);
 
-                            // 上半部：繪製第一張「半」單（以 y:0 擺放並以半高度顯示）
+                            // 上半部：放暫存的前一張半頁
                             newPage.drawPage(pendingHalf.embeddedPage, {
-                                x: 0,
-                                y: 0,
-                                width: width,
-                                height: height
+                                x: 0, y: 0, width, height
                             });
 
-                            // 下半部：將第二張「半」單向下位移 halfHeight，使其上半部標籤露在頁面底部
+                            // 下半部：放目前的這張半頁 (向下位移 halfHeight)
                             newPage.drawPage(embeddedPage, {
-                                x: 0,
-                                y: -halfHeight,
-                                width: width,
-                                height: height
+                                x: 0, y: -halfHeight, width, height
                             });
 
-                            pendingHalf = null; // 清空暫存
+                            pendingHalf = null; // 湊滿一對，清空暫存以接收下一組
                         }
-                    } else {
-                        // 若遇到「全」單，但前面有落單的「半」單，先獨立輸出該「半」單
-                        if (pendingHalf !== null) {
-                            const newPage = mergedPdf.addPage([pendingHalf.width, pendingHalf.height]);
-                            newPage.drawPage(pendingHalf.embeddedPage, {
-                                x: 0,
-                                y: 0,
-                                width: pendingHalf.width,
-                                height: pendingHalf.height
-                            });
-                            pendingHalf = null;
-                        }
-
-                        // 新增「全」單頁面：1:1 原始尺寸貼上
-                        const [embeddedFull] = await mergedPdf.embedPdf(pdf, [i]);
-                        const newPage = mergedPdf.addPage([width, height]);
-                        newPage.drawPage(embeddedFull, {
-                            x: 0,
-                            y: 0,
-                            width: width,
-                            height: height
-                        });
                     }
                 }
             }
 
-            // 迴圈結束後，若有剩餘單數的「半」單，單獨繪製在 A4 上半部
+            // 所有檔案掃瞄完後，若「半頁」總數是奇數，會剩下最後 1 張半頁，單獨印在 A4 上半部
             if (pendingHalf !== null) {
                 const newPage = mergedPdf.addPage([pendingHalf.width, pendingHalf.height]);
                 newPage.drawPage(pendingHalf.embeddedPage, {
-                    x: 0,
-                    y: 0,
-                    width: pendingHalf.width,
-                    height: pendingHalf.height
+                    x: 0, y: 0, width: pendingHalf.width, height: pendingHalf.height
                 });
             }
 
-            // 輸出合併後的 PDF
+            // 下載檔案
             const mergedPdfBytes = await mergedPdf.save();
             const blob = new Blob([mergedPdfBytes], { type: "application/pdf" });
             const link = document.createElement('a');
@@ -156,7 +166,7 @@
             link.download = `黑貓出貨單合併結果_${new Date().getTime()}.pdf`;
             link.click();
 
-            statusDiv.innerText = "✅ 合併完成並已開始下載！(100% 原始尺寸不變形)";
+            statusDiv.innerText = "✅ 智慧合併完成並已開始下載！";
         } catch (error) {
             console.error(error);
             statusDiv.innerText = "❌ 發生錯誤：" + error.message;
